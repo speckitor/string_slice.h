@@ -25,10 +25,12 @@
 /*
  * CHANGELOG:
  *
+ *     version 0.1.0 - introduced ss_free, ss_count, ss_count_overlap, ss_concat and ss_replace,
+ *                     fixed cstrbuf_from_ss and split functions
  *     version 0.0.0 - first version
  */
 
-#Ifndef STRING_SLICE_H_
+#ifndef STRING_SLICE_H_
 #define STRING_SLICE_H_
 
 #include <stdlib.h>
@@ -51,19 +53,27 @@ static inline String_Slice ss(const char *cstr)
     };
 }
 
-/* returns null terminated string allocated in heap */
-static inline char *cstr_from_ss(String_Slice *ss)
+/* frees underlying char *, use only for string slices, which has its data allocated on heap */
+static inline void ss_free(String_Slice *s)
 {
-    char *cstr = calloc(ss->len + 1, sizeof(char));
-    memcpy(cstr, ss->data, ss->len);
+    /* since data is allocated in heap its actually char *, so we can safely cast it */
+    free((void *)s->data);
+}
+
+/* returns null terminated string allocated on heap */
+static inline char *cstr_from_ss(String_Slice *s)
+{
+    char *cstr = calloc(s->len + 1, sizeof(char));
+    memcpy(cstr, s->data, s->len);
     return cstr;
 }
 
 /* copies string to char buffer */
-static inline void cstrbuf_from_ss(String_Slice *ss, char *buf, size_t bufsize)
+static inline void cstrbuf_from_ss(String_Slice *s, char *buf, size_t bufsize)
 {
-    size_t n = bufsize - 1 > ss->len ? ss->len : bufsize - 1;
-    memcpy(buf, ss->data, n);
+    if (bufsize == 0) return;
+    size_t n = bufsize - 1 > s->len ? s->len : bufsize - 1;
+    memcpy(buf, s->data, n);
     buf[n] = '\0';
 }
 
@@ -112,25 +122,34 @@ static inline void ss_trim(String_Slice *s)
     ss_trim_right(s);
 }
 
-/* split functions return array of string slices allocated in heap (n is a len of array) */
+/* split functions return array of string slices allocated on heap (n is a len of array) */
 String_Slice *ss_split_by_delim(String_Slice *s, char delim, size_t *n);
 String_Slice *ss_split_by_kind(String_Slice *s, int(*kind)(int), size_t *n);
 
-#endif // STRING_SLICE_H_
+size_t ss_count(String_Slice *s, String_Slice *sub);
+/* counts all substrings including overlapping ones */
+size_t ss_count_overlap(String_Slice *s, String_Slice *sub);
+String_Slice ss_concat(String_Slice *s1, String_Slice *s2);
+String_Slice ss_replace(String_Slice *s, String_Slice *old, String_Slice *new);
+
+#endif /* STRING_SLICE_H_ */
 
 #ifdef STRING_SLICE_IMPLEMENTATION
 
 String_Slice *ss_split_by_delim(String_Slice *s, char delim, size_t *n)
 {
-    String_Slice *sss = malloc(128 * sizeof(String_Slice));
     size_t len = 0;
+    size_t cap = 128;
+    String_Slice *sss = malloc(cap * sizeof(String_Slice));
     const char *beg = s->data;
 
     for (size_t i = 0; i < s->len; ++i) {
-        if (s->data[i] == delim) {
-            if (len == 128) {
-                len *= 2;
-                sss = realloc(sss, len * sizeof(String_Slice));
+        if (s->data[i] == delim && s->data + i - beg == 0) {
+            beg += 1;
+        } else if (s->data[i] == delim) {
+            if (len == cap) {
+                cap *= 2;
+                sss = realloc(sss, cap * sizeof(String_Slice));
             }
 
             sss[len] = (String_Slice) {
@@ -143,21 +162,30 @@ String_Slice *ss_split_by_delim(String_Slice *s, char delim, size_t *n)
             if (*beg == delim && i < s->len + 1) beg += 1;
         }
     }
+    if (s->data + s->len > beg) {
+        sss[len++] = (String_Slice) {
+            .data = beg,
+            .len = s->data + s->len - beg,
+        };
+    }
     *n = len;
     return sss;
 }
 
 String_Slice *ss_split_by_kind(String_Slice *s, int(*kind)(int), size_t *n)
 {
-    String_Slice *sss = malloc(128 * sizeof(String_Slice));
     size_t len = 0;
+    size_t cap = 128;
+    String_Slice *sss = malloc(cap * sizeof(String_Slice));
     const char *beg = s->data;
 
     for (size_t i = 0; i < s->len; ++i) {
-        if (kind(s->data[i])) {
-            if (len == 128) {
-                len *= 2;
-                sss = realloc(sss, len * sizeof(String_Slice));
+        if (kind(s->data[i]) && s->data + i - beg == 0) {
+            beg += 1;
+        } else if (kind(s->data[i])) {
+            if (len == cap) {
+                cap *= 2;
+                sss = realloc(sss, cap * sizeof(String_Slice));
             }
 
             sss[len] = (String_Slice) {
@@ -170,8 +198,75 @@ String_Slice *ss_split_by_kind(String_Slice *s, int(*kind)(int), size_t *n)
             if (kind(*beg) && i < s->len + 1) beg += 1;
         }
     }
+    if (s->data + s->len > beg) {
+        sss[len++] = (String_Slice) {
+            .data = beg,
+            .len = s->data + s->len - beg,
+        };
+    }
     *n = len;
     return sss;
 }
 
-#endif // STRING_SLICE_IMPLEMENTATION
+size_t ss_count(String_Slice *s, String_Slice *sub)
+{
+    if (sub->len == 0 || sub->len > s->len) return 0;
+
+    size_t count = 0;
+    for (int i = 0; i + sub->len <= s->len; ++i) {
+        if (memcmp(s->data + i, sub->data, sub->len) == 0) {
+            count += 1;
+            i += sub->len - 1;
+            continue;
+        }
+    }
+    return count;
+}
+
+/* counts all substrings including overlapping ones */
+size_t ss_count_overlap(String_Slice *s, String_Slice *sub)
+{
+    if (sub->len == 0 || sub->len > s->len) return 0;
+
+    size_t count = 0;
+    for (int i = 0; i + sub->len <= s->len; ++i) {
+        if (memcmp(s->data + i, sub->data, sub->len) == 0) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+String_Slice ss_concat(String_Slice *s1, String_Slice *s2)
+{
+    String_Slice s;
+    s.len = s1->len + s2->len;
+    char *data = calloc(s.len, sizeof(char));
+    memcpy(data, s1->data, s1->len);
+    memcpy(data + s1->len, s2->data, s2->len);
+    s.data = data;
+    return s;
+}
+
+String_Slice ss_replace(String_Slice *s, String_Slice *old, String_Slice *new)
+{
+    String_Slice ss = {0};
+
+    ss.len = s->len + ss_count(s, old) * (new->len - old->len);
+    char *str = calloc(ss.len, sizeof(char));
+
+    for (int i = 0, j = 0; j < s->len; ++i, ++j) {
+        str[i] = s->data[j];
+        if (j + old->len <= s->len && memcmp(s->data + j, old->data, old->len) == 0) {
+            memcpy(str + i, new->data, new->len);
+            i += new->len - 1;
+            j += old->len - 1;
+            continue;
+        }
+    }
+
+    ss.data = str;
+    return ss;
+}
+
+#endif /* STRING_SLICE_IMPLEMENTATION */
